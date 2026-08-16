@@ -6,8 +6,10 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -41,11 +43,169 @@ _PRE_SESSION = sessionmaker(bind=_PRE_ENGINE, autoflush=False, expire_on_commit=
 _app_db_pre.SessionLocal = _PRE_SESSION
 
 
+@pytest.fixture()
+def seed_basics(_pre_session):
+    """为单测注入两个 mock 供应商账号（deepseek / grsai）。
+
+    conftest 启动时已经塞过默认账号，但 ``_clean_per_test`` 会清空
+    ProviderAccount，所以这里重新塞一遍。
+    """
+    from app.models.provider import ProviderAccount
+    s = _pre_session()
+    try:
+        s.add_all([
+            ProviderAccount(
+                provider_code="deepseek", base_url="https://api.deepseek.com/v1",
+                api_key="mock-ds-key", model="deepseek-chat", valid=True,
+            ),
+            ProviderAccount(
+                provider_code="grsai", base_url="https://api.grsai.com/v1",
+                api_key="mock-grsai-key", model="nano-banana-2", valid=True,
+            ),
+        ])
+        s.commit()
+    finally:
+        s.close()
+
+
+@pytest.fixture()
+def _pre_session():
+    """从 conftest 暴露 in-memory SessionLocal 工厂。"""
+    return _PRE_SESSION
+
+
+# ---------------------------------------------------------------- 一次性 seed
+# 进程级：导入 conftest 时把提示词五件套 + 默认 settings 写入 _PRE_ENGINE。
+# 这模拟 ``python -m app.seeds.seed`` 的效果，但走的是 in-memory DB，
+# 不污染主库 ``data/catong_gen.db``。
+def _bootstrap_seed_data():
+    import json as _json
+    from app.models.prompt import (Prompt, PromptPreset, PromptSnippet,
+                                    PromptTemplate)
+    from app.models.role import CategoryTag
+    from app.models.provider import ProviderAccount
+    from app.seeds.seed import (TEMPLATES, IMAGE_DERIVE_BODY, SUMMARY_BODY,
+                                PORTRAIT_BODY, PRESETS)
+
+    src_path = Path(__file__).parent.parent / "app" / "seeds" / "source_prompts.json"
+    if not src_path.exists():
+        return
+    src = _json.loads(src_path.read_text(encoding="utf-8"))
+    purpose_map = {
+        "小说视频提示词指令": "video_derive",
+        "获取人物形象": "role_derive",
+        "角色三视图": "role_portrait",
+        "人物形象视频": "role_video",
+        "图片推导词默认前缀": "image_derive",
+        "图片推导词默认后缀": "image_derive",
+        "视频推导词默认前缀": "video_derive",
+        "视频推导词默认后缀": "video_derive",
+        "分镜提示词-短文本版": "storyboard_short",
+        "分镜提示词-长文本版": "storyboard_long",
+        "一键对话": "dialogue_split",
+        "文案同义改写": "rewrite",
+        "VIP智能角色推导": "role_derive",
+    }
+    s = _PRE_SESSION()
+    try:
+        for row in src:
+            s.add(Prompt(
+                title=row["title"], content=row["content"],
+                category=row["category"],
+                purpose=purpose_map.get(row["title"], "generic"),
+                is_system=bool(row.get("is_system", 0)),
+            ))
+        s.add(PromptSnippet(tag="negative", name="平台水印禁令（源库实证）",
+                            content="禁止：图片右下角出现腾讯动漫 17173 等其他机构水印！",
+                            sort_order=0))
+        s.add(PromptSnippet(tag="style_prefix", name="图片推导默认前缀（prompts#5）",
+                            content="顶级韩漫风格，融合精致日系2D插画美学，精细线稿，柔和色彩，电影级光影，高对比度，",
+                            sort_order=0))
+        s.add(PromptSnippet(tag="portrait_render", name="三视图渲染公共词（roles 实证）",
+                            content="strictly isolated on a pure white background, solid white backdrop, no cast shadows，无场景、无文字、无 logo。",
+                            sort_order=1))
+        src_by_title = {r["title"]: r["content"] for r in src}
+        title_by_pid = {r["id"]: r["title"] for r in src}
+        tpl_id_by_stage: dict = {}
+        for stage, name, src_pid, extra in TEMPLATES:
+            if src_pid is not None:
+                body = src_by_title[title_by_pid[src_pid]] + extra
+            elif stage == "image_derive":
+                body = IMAGE_DERIVE_BODY
+            elif stage == "summary":
+                body = SUMMARY_BODY
+            elif stage == "role_portrait":
+                body = PORTRAIT_BODY
+            else:
+                continue
+            tpl = PromptTemplate(stage=stage, name=name, body=body)
+            s.add(tpl)
+            s.flush()
+            tpl_id_by_stage[stage] = tpl.id
+        for pid, stage, name, tpl_stage, active in PRESETS:
+            if tpl_stage not in tpl_id_by_stage:
+                continue
+            s.add(PromptPreset(
+                id=pid, stage=stage, name=name,
+                template_id=tpl_id_by_stage[tpl_stage],
+                slots_json="{}", is_system=True, is_active=active,
+            ))
+        for cat, val, order in [
+            ("类型", "角色", 0), ("类型", "场景", 1), ("类型", "道具", 2),
+            ("时空", "古代", 0), ("时空", "现代", 1), ("时空", "科幻", 2),
+            ("时空", "玄幻", 3), ("时空", "ABO", 4),
+        ]:
+            s.add(CategoryTag(category=cat, tag_value=val, display_order=order))
+        from app.models.provider import Setting
+        for k, v in {
+            "llm_default_provider": "deepseek",
+            "image_provider": "grsai",
+            "image_model": "nano-banana-2",
+            "image_aspect_ratio": "3:4",
+            "image_resolution": "2K",
+            "manga_derive_preset_id": "plot_manga_fusion_bw",
+        }.items():
+            s.add(Setting(key=k, value=v))
+        # 默认账号
+        s.add(ProviderAccount(provider_code="deepseek", base_url="https://api.deepseek.com/v1",
+                              api_key="mock-ds-key", model="deepseek-chat", valid=True))
+        s.add(ProviderAccount(provider_code="grsai", base_url="https://api.grsai.com/v1",
+                              api_key="mock-grsai-key", model="nano-banana-2", valid=True))
+        s.commit()
+    finally:
+        s.close()
+
+
+_bootstrap_seed_data()
+
+
 @pytest.fixture(autouse=True)
 def _patch_output_dir(monkeypatch, tmp_path):
-    """所有 e2e 测试的 Output 目录指向 tmp_path。"""
-    monkeypatch.setattr("app.config.OUTPUT_DIR", tmp_path, raising=False)
-    yield
+    """所有 e2e 测试的 Output 目录指向 tmp_path。
+
+    既要 patch ``app.config.OUTPUT_DIR``，也要把已经 import 过的
+    业务模块里的 ``OUTPUT_DIR`` 别名同步指向新值（否则它们仍是
+    import 时绑定的旧 Path）。
+    """
+    import app.config as _cfg
+    import app.services.export as _exp_svc
+    import app.services.image_generation as _img_svc
+    import app.services.image_derive_service as _ds
+    import app.routers.export as _exp_rt
+    import app.routers.image_generation as _img_rt
+    import app.routers.image_derive as _ds_rt
+    import app.routers.images as _img_rt2
+
+    old = _cfg.OUTPUT_DIR
+    _cfg.OUTPUT_DIR = tmp_path
+    for mod in (_exp_svc, _img_svc, _ds,
+                _exp_rt, _img_rt, _ds_rt, _img_rt2):
+        if hasattr(mod, "OUTPUT_DIR"):
+            mod.OUTPUT_DIR = tmp_path
+    try:
+        yield
+    finally:
+        _cfg.OUTPUT_DIR = old
 
 
 @pytest.fixture(autouse=True)

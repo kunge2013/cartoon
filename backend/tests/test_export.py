@@ -24,8 +24,13 @@ def db_session():
 
 
 @pytest.fixture
-def sample_data(db_session):
-    """创建测试数据"""
+def sample_data(db_session, tmp_path):
+    """创建测试数据：3 个测试图 + 3 个分镜。
+
+    修复原版 bug：原先用 ``with tempfile.TemporaryDirectory()`` 临时目录，
+    with 退出时目录被删，但 ``main_image`` 仍指向已删的路径，导致
+    ExportService 找不到图。改为用 ``tmp_path``（pytest fixture，测试结束才清）。
+    """
     # 创建项目
     project = Project(
         name="Test Project",
@@ -34,34 +39,26 @@ def sample_data(db_session):
     )
     db_session.add(project)
     db_session.flush()
-    
-    # 创建临时测试图片
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        
-        # 创建 3 个测试图片
-        for i in range(1, 4):
-            img = Image.new("RGB", (800, 1200), color=(i * 50, 100, 150))
-            img_path = tmpdir_path / f"test_{i}.jpg"
-            img.save(img_path, "JPEG")
-            
-            script = Script(
-                project_id=project.id,
-                order_index=i,
-                shot_index=i,
-                content=f"Test content {i}",
-                image_prompt=f"Test prompt {i}",
-                main_image=str(img_path),
-                generation_enabled=True,
-            )
-            db_session.add(script)
-        
-        db_session.flush()
-        
-        yield {
-            "project": project,
-            "tmpdir": tmpdir_path,
-        }
+
+    # 在 tmp_path 下创建 3 张测试图
+    for i in range(1, 4):
+        img = Image.new("RGB", (800, 1200), color=(i * 50, 100, 150))
+        img_path = tmp_path / f"test_{i}.jpg"
+        img.save(img_path, "JPEG")
+
+        script = Script(
+            project_id=project.id,
+            order_index=i,
+            shot_index=i,
+            content=f"Test content {i}",
+            image_prompt=f"Test prompt {i}",
+            main_image=str(img_path),
+            generation_enabled=True,
+        )
+        db_session.add(script)
+
+    db_session.flush()
+    return {"project": project, "tmpdir": tmp_path}
 
 
 def test_create_export_task(db_session, sample_data):

@@ -52,6 +52,9 @@ MOCK_STORYBOARD = (
 
 # ---------------------------------------------------------------- 公共 fixture
 
+# 注意：以下 import 必须在 conftest 之后
+from app.main import app  # noqa: E402
+
 
 @pytest.fixture()
 def client() -> Iterator[TestClient]:
@@ -59,30 +62,53 @@ def client() -> Iterator[TestClient]:
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _pre_session():
+    """从 conftest 暴露 in-memory SessionLocal 工厂。"""
+    from tests.conftest import _PRE_SESSION
+    return _PRE_SESSION
+
+
 @pytest.fixture()
-def seed_basics(e2e_session_factory):
-    """为单测注入两个 mock 供应商账号（deepseek / grsai）。"""
+def e2e_session_factory(_pre_session):
+    """别名 fixture，兼容历史用法。"""
+    return _pre_session
+
+
+@pytest.fixture(autouse=True)
+def _clean_per_test(_pre_session):
+    """每用例前清空业务表 + ProviderAccount（保留提示词五件套 / 分类标签 / 默认 settings）。"""
+    from app.models.novel import Novel, NovelFile
+    from app.models.role import Role, RoleTag
+    from app.models.project import Project, Script
+    from app.models.image import ImageTask
+    from app.models.export import ExportTask
+    from app.models.prompt import PromptRenderLog
+    from app.models.art_style import ArtStyle
     from app.models.provider import ProviderAccount
-    s = e2e_session_factory()
+
+    s = _pre_session()
     try:
-        s.add_all([
-            ProviderAccount(
-                provider_code="deepseek", base_url="https://api.deepseek.com/v1",
-                api_key="mock-ds-key", model="deepseek-chat", valid=True,
-            ),
-            ProviderAccount(
-                provider_code="grsai", base_url="https://api.grsai.com/v1",
-                api_key="mock-grsai-key", model="nano-banana-2", valid=True,
-            ),
-        ])
+        for model in (ImageTask, ExportTask, Script, Project, RoleTag, Role,
+                      NovelFile, Novel, PromptRenderLog, ArtStyle, ProviderAccount):
+            try:
+                s.query(model).delete()
+            except Exception:
+                s.rollback()
         s.commit()
     finally:
         s.close()
+    yield
 
 
-# 以下 import 必须在 conftest 之后，否则会触发模块级初始化问题
-from app.main import app  # noqa: E402
-from tests.conftest import _PRE_ENGINE, _PRE_SESSION  # noqa: E402
+@pytest.fixture()
+def db_session(_pre_session) -> Iterator:
+    """每次用例一个干净 session。"""
+    s = _pre_session()
+    try:
+        yield s
+    finally:
+        s.close()
 
 
 # ============================================================== 业务用例
@@ -483,14 +509,13 @@ def test_seed_runs_clean():
     """验证 seed.seed_all() 在 in-memory 引擎上是幂等的。"""
     from app.seeds import seed as seed_mod
     from app.database import Base
+    from tests.conftest import _PRE_ENGINE, _PRE_SESSION
 
-    # seed_all 用模块级 engine / SessionLocal
     seed_mod.engine = _PRE_ENGINE
     seed_mod.Base = Base
     seed_mod.SessionLocal = _PRE_SESSION
 
     stats = seed_mod.seed_all(verbose=False)
-    # 全部已存在 → 0 插入
     assert stats["prompts"] == 0
     assert stats["templates"] == 0
     assert stats["presets"] == 0
