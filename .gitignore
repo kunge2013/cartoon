@@ -1,0 +1,73 @@
+# [AGC:FILE] tool=Cc author=fangkun date=2026-08-16
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Secrets and credentials
+*_secrets.json
+*credentials*
+*.key
+*.pem
+
+# Project specific - contains API keys
+_inspect/
+backend/.idea/
+backend/.pytest_cache/
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Output files
+Output/
+data/
+
+# Roles
+roles/
