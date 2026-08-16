@@ -48,6 +48,10 @@ logs/
 .env
 .env.local
 .env.*.local
+.env.test
+.env.test.*
+backend/.env
+backend/.env.test
 
 # Secrets and credentials
 *_secrets.json
